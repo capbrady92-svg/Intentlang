@@ -131,8 +131,8 @@ python examples.py all          # write all 5 projects
 
 | File | Contents |
 |---|---|
-| [docs/06-guide_part1.md](docs/06-guide_part1.md) | Tutorial part 1 |
-| [docs/07-guide_part2.md](docs/07-guide_part2.md) | Tutorial part 2 |
+| [docs/06-guide-part1.md](docs/06-guide-part1.md) | Tutorial part 1 |
+| [docs/07-guide-part2.md](docs/07-guide-part2.md) | Tutorial part 2 |
 | [docs/01-language.md](docs/01-language.md) | Full language reference — every keyword, syntax, and directive |
 | [docs/02-projects.md](docs/02-projects.md) | Multi-file projects, domains, core.il, cross-file references |
 | [docs/03-ir.md](docs/03-ir.md) | The IR graph — how it works, how to query it, impact analysis |
