@@ -113,7 +113,7 @@ def parse_line(content: str, line_num: int, errors: list, filename: str, level: 
     # block declarations — added interface, preserve, imports
     m = re.match(
         r"^(app|service|module|feature|model|route|event|state|component|page|api|auth|db"
-        r"|domain|project|platform|critical_path|inline|interface|preserve|imports)\s+([\w./\-@^]+)\s*:?$",
+        r"|domain|project|platform|critical_path|inline|interface|preserve|imports|config|environment)\s+([\w./\-@^]+)\s*:?$",
         content
     )
     if m:
@@ -133,7 +133,7 @@ def parse_line(content: str, line_num: int, errors: list, filename: str, level: 
                 "level": level, "filename": filename}
 
     # route shorthand
-    m = re.match(r"^route\s+(GET|POST|PUT|PATCH|DELETE|WS)\s+([\w/:]+)\s*:?$", content)
+    m = re.match(r"^route\s+(GET|POST|PUT|PATCH|DELETE|WS)\s+([\w/:\-]+)\s*:?$", content)
     if m:
         uid = make_uid("route", f"{m[1]}_{m[2]}", filename)
         return {"type": "route", "method": m[1], "path": m[2], "block": True, "children": [],
@@ -498,8 +498,13 @@ def parse_git_import(ref: str) -> Optional[dict]:
       github.com/org/repo/intent/identity@^1.2
       github.com/org/repo@v2.0
       ../local/path
+      /absolute/path
     """
-    if ref.startswith("./") or ref.startswith("../") or ref.startswith("/"):
+    ref = ref.strip()
+    # local path: relative or absolute, or anything that isn't a known git host
+    git_hosts = ("github.com", "gitlab.com", "bitbucket.org")
+    is_git = any(ref.startswith(h) for h in git_hosts)
+    if not is_git:
         return {"type": "local", "path": ref}
 
     m = re.match(
@@ -586,14 +591,18 @@ def resolve_git_import(ref: str, domain_alias: str) -> Optional[list]:
     console.print(f"[dim]  Resolved git import {domain_alias}: {len(files)} files[/]")
     return files
 
-def load_imports(core_files: list) -> list:
+def load_imports(core_files: list, source_dir: str = None) -> list:
     """
     Scan core.il for imports: block and resolve each one.
+    Resolves local paths relative to the directory core.il was loaded from.
     Returns additional .il files to merge into the project.
     """
     core = next((f for f in core_files if f["name"] == "core.il"), None)
     if not core:
         return []
+
+    # resolve relative to where core.il lives, not where we launched from
+    base_dir = Path(source_dir).resolve() if source_dir else Path(core.get("source_dir", ".")).resolve()
 
     ast    = parse_intent_lang(core["content"], "core.il")["ast"]
     extras = []
@@ -604,8 +613,12 @@ def load_imports(core_files: list) -> list:
                 if child.get("type") == "property":
                     alias = child["key"]
                     ref   = str(child["value"])
-                    console.print(f"[bright_magenta]Resolving import:[/] [bright_cyan]{alias}[/] ← {ref}")
-                    resolved = resolve_git_import(ref, alias)
+                    # resolve local paths relative to core.il location
+                    resolved_ref = ref
+                    if ref.startswith("./") or ref.startswith("../") or (not ref.startswith("http") and "/" in ref and not any(h in ref for h in ["github.com","gitlab.com","bitbucket.org"])):
+                        resolved_ref = str((base_dir / ref).resolve())
+                    console.print(f"[bright_magenta]Resolving import:[/] [bright_cyan]{alias}[/] ← {resolved_ref}")
+                    resolved = resolve_git_import(resolved_ref, alias)
                     if resolved:
                         extras.extend(resolved)
         for child in node.get("children", []):
@@ -1224,7 +1237,7 @@ environment prod:
 def load_il_files(directory: str) -> list:
     path = Path(directory)
     if not path.exists(): return []
-    return [{"name": f.name, "content": f.read_text("utf-8")}
+    return [{"name": f.name, "content": f.read_text("utf-8"), "source_dir": str(path.resolve())}
             for f in sorted(path.glob("*.il"))]
 
 def save_il_files(files: list, directory: str):
@@ -1394,8 +1407,9 @@ def main():
         console.print("[dim]No .il files found — loading example project.[/]")
         files = [{"name":k,"content":v} for k,v in EXAMPLE_PROJECT.items()]
 
-    # resolve imports declared in core.il
-    imported = load_imports(files)
+    # resolve imports declared in core.il — path relative to where files were loaded from
+    _src_dir = files[0].get("source_dir", ".") if files else "."
+    imported = load_imports(files, _src_dir)
     if imported:
         files = files + imported
         console.print(f"[bright_green]Resolved {len(imported)} imported file(s)[/]")
@@ -1505,7 +1519,8 @@ def main():
             loaded    = load_il_files(directory)
             if loaded:
                 files    = loaded
-                imported = load_imports(files)
+                _src_dir2 = files[0].get("source_dir", ".") if files else "."
+                imported = load_imports(files, _src_dir2)
                 if imported: files = files + imported
                 ir = rebuild_ir()
                 console.print(f"[bright_green]Loaded {len(loaded)} file(s)[/]")

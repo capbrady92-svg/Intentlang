@@ -939,14 +939,736 @@ rules:
 
 }
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. INTERFACE SHOWCASE  —  shows interface:, expose:, hide:, preserve:
+#    Stack: fastapi + postgres
+#    Purpose: demonstrates publishing a domain as a typed SDK others can import
+#    Try: il› publish identity  then inspect intentlang_output/interface/identity/
+# ══════════════════════════════════════════════════════════════════════════════
+
+PROJECTS["interface-showcase"] = {
+
+"core.il": """\
+// core.il — Interface Showcase
+// Demonstrates: interface: blocks, expose:/hide:, preserve:, breaking_changes:
+//
+// After loading, try:
+//   il› query show interfaces
+//   il› query show compat
+//   il› publish identity
+//   il› publish notifications
+//   il› transpile identity.il
+project Showcase:
+  version: 1.0.0
+  stack: fastapi + postgres
+  pattern: REST
+  auth: jwt
+
+  domains:
+    - identity
+    - notifications
+    - content
+
+  rules:
+    - all models get id (uuid pk), created_at, updated_at
+    - all errors return { code, message, request_id }
+    - all endpoints require auth unless marked public
+    - tokens expire after 24h
+""",
+
+"identity.il": """\
+// identity.il — Identity domain with a published interface
+//
+// This domain publishes a typed interface so other projects can:
+//   1. Import the schema:  imports: identity: ../this-project/intent
+//   2. Use the TypeScript client:  intentlang_output/interface/identity/identity.client.ts
+//   3. Use the Python client:      intentlang_output/interface/identity/identity_client.py
+//   4. Browse the OpenAPI spec:    intentlang_output/interface/identity/identity.openapi.json
+//
+// Run: il› publish identity
+
+domain identity:
+  description: "User identity, auth, and profile management"
+
+interface:
+  version: 2.1.0
+
+  expose:
+    - model User
+    - model Profile
+    - feature Auth
+    - feature Users
+
+  hide:
+    - model PasswordReset
+    - model AuditEntry
+    - field User.password_hash
+    - field User.mfa_secret
+
+  breaking_changes:
+    - User.username field renamed to User.handle (v1.x -> v2.0)
+    - POST /auth/login now returns { token, user } instead of just token (v2.0 -> v2.1)
+
+  deprecated:
+    - route GET /auth/profile (use GET /users/me instead, removed in v3.0)
+    - field User.legacy_id (will be removed in v3.0)
+
+// ── Models ────────────────────────────────────────────────────────────────────
+
+model User:
+  id (uuid, pk)
+  handle (str, required, unique, indexed)
+  email (str, required, unique)
+  password_hash (str, required, private)
+  mfa_secret (str, optional, private)
+  role (str, default "user")
+  verified (bool, default false)
+  legacy_id (str, optional)
+
+model Profile:
+  id (uuid, pk)
+  user -> User
+  display_name (str, required)
+  avatar (str, optional)
+  bio (str, optional)
+  location (str, optional)
+  website (str, optional)
+
+model PasswordReset:
+  id (uuid, pk)
+  user -> User
+  token (str, required, unique, private)
+  expires_at (datetime, required)
+  used (bool, default false)
+
+model AuditEntry:
+  id (uuid, pk)
+  user -> User
+  action (str, required)
+  ip (str, optional)
+  user_agent (str, optional)
+
+// ── Features ──────────────────────────────────────────────────────────────────
+
+feature Auth:
+  route POST /auth/register:
+    auth: public
+    input: handle, email, password, display_name?
+    action: validate handle unique, hash password, create User and Profile, send verification email
+    returns: { token, user }
+    error: if handle taken -> 409 "Handle already in use"
+    error: if email taken -> 409 "Email already registered"
+
+  route POST /auth/login:
+    auth: public
+    input: email, password
+    action: verify credentials, record audit entry, issue jwt
+    returns: { token, user }
+    error: if invalid -> 401 "Invalid credentials"
+    error: if unverified -> 403 "Please verify your email first"
+
+  route POST /auth/verify-email:
+    auth: public
+    input: token (str, required)
+    action: verify token, set User.verified = true
+    returns: { ok: true }
+
+  route POST /auth/forgot-password:
+    auth: public
+    input: email
+    action: create PasswordReset token, send reset email
+    returns: { ok: true }
+    note: always returns 200 regardless of whether email exists (prevents enumeration)
+
+  route POST /auth/reset-password:
+    auth: public
+    input: token, new_password
+    action: verify PasswordReset token not used/expired, update password hash, mark token used
+    returns: { ok: true }
+    error: if expired -> 400 "Reset token expired"
+    error: if already used -> 400 "Reset token already used"
+
+  route POST /auth/logout:
+    action: invalidate current session token
+    returns: { ok: true }
+
+feature Users:
+  route GET /users/me:
+    action: return current User with Profile
+    returns: { user: User, profile: Profile }
+
+  route PUT /users/me:
+    input: display_name?, bio?, location?, website?, avatar?
+    action: update Profile for current user
+    returns: Profile
+
+  route GET /users/:handle:
+    auth: public
+    action: fetch User and Profile by handle
+    returns: { user: User, profile: Profile }
+    error: if not found -> 404
+
+  route PUT /users/me/handle:
+    input: handle (str, required)
+    action: update User.handle, validate uniqueness
+    returns: User
+    error: if taken -> 409
+
+rules:
+  - password minimum 8 characters
+  - handles are lowercase alphanumeric + underscores only, 3-30 chars
+  - audit log all auth events (login, logout, password change)
+  - mfa_secret and password_hash never appear in any API response
+""",
+
+"notifications.il": """\
+// notifications.il — Notifications domain with versioned interface
+//
+// Shows: interface with events exposed, deprecation notices
+// Run: il› publish notifications
+
+domain notifications:
+  description: "In-app and email notification delivery"
+
+interface:
+  version: 1.3.0
+
+  expose:
+    - model Notification
+    - feature Notifications
+    - event notification_sent
+
+  hide:
+    - model NotificationTemplate
+    - model DeliveryLog
+
+  deprecated:
+    - field Notification.read (use Notification.status instead, removed in v2.0)
+    - route POST /notifications/mark-read (use PATCH /notifications/:id instead)
+
+model Notification:
+  id (uuid, pk)
+  recipient -> User
+  type (str, required)
+  title (str, required)
+  body (str, required)
+  status (str, default "unread")
+  read (bool, default false)
+  action_url (str, optional)
+  metadata (json, optional)
+  sent_at (datetime, optional)
+
+model NotificationTemplate:
+  id (uuid, pk)
+  type (str, required, unique)
+  subject (str, required)
+  body_template (str, required, private)
+  channel (str, default "in_app")
+
+model DeliveryLog:
+  id (uuid, pk)
+  notification -> Notification
+  channel (str, required)
+  status (str, required)
+  error (str, optional)
+  attempted_at (datetime, required)
+
+feature Notifications:
+  route GET /notifications:
+    input: status? (unread|read|all, default unread), limit? (default 20), cursor?
+    action: fetch Notifications for current user, cursor-paginated
+    returns: { notifications: Notification[], unread_count, next_cursor }
+
+  route PATCH /notifications/:id:
+    input: status (read|archived)
+    action: update Notification status
+    returns: Notification
+    error: if not owner -> 404
+
+  route POST /notifications/mark-all-read:
+    action: set status = read on all unread Notifications for current user
+    returns: { updated: int }
+
+  route DELETE /notifications/:id:
+    action: delete Notification
+    returns: { ok: true }
+
+event notification_sent:
+  payload: { notification_id, recipient_id, type, title }
+  channel: websocket + webhook
+  description: emitted when a new notification is delivered to a user
+
+rules:
+  - users can only read or delete their own notifications
+  - unread_count cached in redis, invalidated on status change
+  - notification delivery is always async, never blocks the originating request
+  - templates are internal — never exposed via API
+""",
+
+"content.il": """\
+// content.il — Content domain consuming the identity interface
+//
+// Shows cross-domain references to the published identity interface.
+// In a real multi-project setup, replace @identity with an import:
+//   imports:
+//     identity: github.com/myorg/myapp/intent@^2.1
+
+domain content:
+  description: "Posts, comments, and reactions"
+
+model Post:
+  id (uuid, pk)
+  author: @identity/User!
+  title (str, required)
+  slug (str, required, unique, indexed)
+  body (str, required)
+  status (str, default "draft")
+  published_at (datetime, optional)
+  tags (list, optional)
+
+  @level: low
+  search_vector (tsvector, indexed)
+
+model Comment:
+  id (uuid, pk)
+  post -> Post
+  author: @identity/User!
+  body (str, required)
+  parent -> Comment
+  deleted (bool, default false)
+
+model Reaction:
+  id (uuid, pk)
+  post -> Post
+  user: @identity/User!
+  emoji (str, required)
+
+feature Posts:
+  route GET /posts:
+    auth: public
+    input: status? (published), tag?, limit? (default 20), cursor?
+    action: fetch published Posts, cursor-paginated
+    returns: { posts: Post[], next_cursor }
+
+  route GET /posts/:slug:
+    auth: public
+    action: fetch Post with author Profile and comment count
+    returns: { post: Post, author: Profile, comment_count: int }
+    error: if not found -> 404
+
+  route POST /posts:
+    input: title, body, tags?, status? (default draft)
+    action: create Post, auto-generate slug from title
+    returns: Post
+
+  route PUT /posts/:slug:
+    input: title?, body?, tags?, status?
+    action: update Post owned by current user
+    returns: Post
+    error: if not author -> 403
+
+  route DELETE /posts/:slug:
+    action: delete Post
+    error: if not author -> 403
+
+feature Comments:
+  route GET /posts/:slug/comments:
+    auth: public
+    input: limit? (default 50)
+    action: fetch top-level Comments with nested replies (max 2 levels)
+    returns: Comment[]
+
+  route POST /posts/:slug/comments:
+    input: body, parent_id?
+    action: create Comment
+    returns: Comment
+
+  route DELETE /comments/:id:
+    action: soft delete Comment (set deleted=true, body="[deleted]")
+    error: if not author -> 403
+
+feature Reactions:
+  route POST /posts/:slug/reactions:
+    input: emoji
+    action: toggle Reaction for current user (add if absent, remove if present)
+    returns: { emoji, count, reacted: bool }
+
+  @level: mid
+  feature Search:
+    route GET /posts/search:
+      auth: public
+      input: q (str, required), tag?
+      action: full-text search Posts using search_vector, rank by relevance
+      algorithm: postgres tsvector + tsquery with ts_rank_cd
+      returns: { posts: Post[], total }
+
+rules:
+  - only post authors can edit or delete their own posts
+  - deleted comments show body as [deleted] to others
+  - reactions are toggled not stacked
+  - published posts cannot be moved back to draft
+  - slug auto-generated from title, unique enforced with numeric suffix if collision
+""",
+
+"platform.il": """\
+// platform.il — Infrastructure with preserve rules
+//
+// Shows: preserve: block protecting migrations and env files
+
+domain platform:
+
+// ── Preserve Rules ────────────────────────────────────────────────────────────
+// These files will NEVER be overwritten by transpilation, even if regenerated.
+// Remove a pattern here to allow regeneration.
+
+preserve:
+  - migrations/*
+  - .env
+  - .env.local
+  - .env.production
+  - backend/custom/*
+  - scripts/seed_data.py
+
+@level: low
+config Database:
+  engine: postgres 15
+  pool_size: 20
+  max_overflow: 10
+  statement_timeout: 30s
+  idle_timeout: 600s
+
+@level: mid
+config Cache:
+  engine: redis 7
+  strategy: lru
+  max_memory: 256mb
+  eviction: allkeys-lru
+  key_prefix: showcase:
+
+config RateLimit:
+  default: 120/minute/ip
+  auth_endpoints: 15/minute/ip
+  search: 30/minute/user
+  reason: tighter limits on auth to prevent brute force
+
+environment dev:
+  database: localhost:5432/showcase_dev
+  cache: localhost:6379
+  email: console
+  debug: true
+
+environment staging:
+  database: rds.staging/showcase
+  cache: elasticache.staging
+  email: ses
+
+environment prod:
+  database: rds.prod/showcase + read_replica
+  cache: elasticache.prod
+  email: ses
+  cdn: cloudfront
+""",
+
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 7. MICROSERVICES  —  shows git imports between two services
+#    Stack: go + grpc (auth-service)  +  python + fastapi (api-gateway)
+#    Purpose: demonstrates cross-project interface consumption via imports:
+#    NOTE: the imports: in gateway/core.il points to a local path so it works
+#          without a real git repo — swap for a real git URL in production
+# ══════════════════════════════════════════════════════════════════════════════
+
+PROJECTS["microservices"] = {
+
+"auth-service/core.il": """\
+// auth-service/core.il — Standalone auth microservice
+// This service PUBLISHES an interface that other services consume.
+// Run: il› publish auth  to generate the SDK
+project AuthService:
+  version: 1.0.0
+  stack: go + grpc + postgres
+  pattern: gRPC + REST
+  auth: internal
+
+  domains:
+    - auth
+
+  rules:
+    - all models get id (uuid pk), created_at, updated_at
+    - all errors return { code, message }
+    - internal service-to-service calls use mutual TLS
+    - tokens are short-lived JWTs (15 min access, 7 day refresh)
+""",
+
+"auth-service/auth.il": """\
+// auth-service/auth.il — Auth microservice domain + published interface
+//
+// Publishes a typed interface consumed by api-gateway and any other service.
+// Run: il› publish auth
+
+domain auth:
+  description: "Token issuance, validation, and user identity"
+
+interface:
+  version: 1.0.0
+
+  expose:
+    - model TokenPair
+    - model UserIdentity
+    - feature TokenAPI
+
+  hide:
+    - model RefreshToken
+    - model BlacklistedToken
+    - field UserIdentity.internal_flags
+
+model UserIdentity:
+  id (uuid, pk)
+  email (str, required, unique)
+  handle (str, required, unique)
+  role (str, default "user")
+  verified (bool, default false)
+  internal_flags (int, default 0, private)
+
+model TokenPair:
+  access_token (str, required)
+  refresh_token (str, required)
+  expires_in (int, required)
+  token_type (str, default "Bearer")
+
+model RefreshToken:
+  id (uuid, pk)
+  user -> UserIdentity
+  token_hash (str, required, private)
+  expires_at (datetime, required)
+  rotated (bool, default false)
+
+model BlacklistedToken:
+  id (uuid, pk)
+  jti (str, required, unique, indexed)
+  expires_at (datetime, required)
+
+feature TokenAPI:
+  route POST /auth/token:
+    auth: public
+    input: email, password
+    action: verify credentials, issue TokenPair, store RefreshToken hash
+    returns: TokenPair
+    error: if invalid -> 401
+
+  route POST /auth/token/refresh:
+    auth: public
+    input: refresh_token
+    action: validate refresh token, rotate it, issue new TokenPair
+    returns: TokenPair
+    error: if expired -> 401 "Refresh token expired"
+    error: if rotated -> 401 "Refresh token already used"
+
+  route POST /auth/token/revoke:
+    input: token
+    action: blacklist the token JTI
+    returns: { ok: true }
+
+  route GET /auth/validate:
+    input: token (header: Authorization)
+    action: validate JWT signature and expiry, check not blacklisted
+    returns: { valid: bool, user: UserIdentity }
+    note: this route is called by api-gateway on every request — keep it fast
+
+  @level: low
+  config TokenValidation:
+    strategy: check blacklist in redis before postgres
+    cache_ttl: match token expiry
+    reason: /auth/validate is on the hot path — must be sub-millisecond
+
+rules:
+  - refresh tokens are rotated on every use (one-time use)
+  - blacklisted JTIs cached in redis for duration of token lifetime
+  - access tokens expire in 15 minutes
+  - refresh tokens expire in 7 days
+  - internal_flags never exposed outside this service
+""",
+
+"api-gateway/core.il": """\
+// api-gateway/core.il — API gateway consuming auth-service interface
+//
+// imports: pulls the auth-service interface from a local path.
+// In production, swap for: auth: github.com/myorg/auth-service/intent@^1.0
+project APIGateway:
+  version: 1.0.0
+  stack: python + fastapi + postgres
+  pattern: REST
+  auth: jwt
+
+  domains:
+    - gateway
+    - users
+    - content
+
+  imports:
+    auth: ../auth-service
+
+  rules:
+    - all models get id (uuid pk), created_at, updated_at
+    - all errors return { code, message, request_id }
+    - all endpoints validate token via @auth/TokenAPI.GET /auth/validate
+    - rate limit: 200/minute/user
+""",
+
+"api-gateway/gateway.il": """\
+// api-gateway/gateway.il — Gateway routing and middleware
+//
+// Shows: consuming @auth/UserIdentity from imported auth-service interface
+
+domain gateway:
+  description: "Request routing, auth middleware, rate limiting"
+
+model RequestLog:
+  id (uuid, pk)
+  user: @auth/UserIdentity?
+  method (str, required)
+  path (str, required)
+  status (int, required)
+  duration_ms (int, required)
+  ip (str, required)
+
+feature Middleware:
+  config AuthMiddleware:
+    action: extract Bearer token, call auth-service GET /auth/validate
+    on_valid: attach UserIdentity to request context
+    on_invalid: return 401
+    cache: cache valid tokens for 30s to reduce auth-service calls
+    reason: every request hits this middleware — must be fast
+
+  config RateLimiting:
+    backend: redis sliding window
+    key: user_id if authenticated, ip if not
+    limit_default: 200/minute
+    limit_search: 30/minute
+    limit_write: 60/minute
+
+  config RequestLogging:
+    action: async log all requests to RequestLog table
+    exclude: /health, /metrics
+    reason: async so it never blocks request processing
+
+  route GET /health:
+    auth: public
+    action: check db connection, redis connection, auth-service reachability
+    returns: { status, services: { db, redis, auth } }
+
+  route GET /metrics:
+    auth: internal
+    action: return prometheus metrics
+    returns: prometheus text format
+""",
+
+"api-gateway/users.il": """\
+// api-gateway/users.il — User profiles (wraps auth-service identity)
+//
+// Shows: extending an imported interface with local data
+
+domain users:
+  description: "User profiles and preferences, built on top of auth-service identity"
+
+model UserProfile:
+  id (uuid, pk)
+  auth_user_id: @auth/UserIdentity!
+  display_name (str, required)
+  avatar (str, optional)
+  bio (str, optional)
+  location (str, optional)
+  website (str, optional)
+
+model UserPreferences:
+  id (uuid, pk)
+  user -> UserProfile
+  theme (str, default "system")
+  email_notifications (bool, default true)
+  timezone (str, default "UTC")
+
+feature Profiles:
+  route GET /users/me:
+    action: fetch UserProfile for current auth user, merge with @auth/UserIdentity
+    returns: { identity: UserIdentity, profile: UserProfile, preferences: UserPreferences }
+
+  route PUT /users/me:
+    input: display_name?, avatar?, bio?, location?, website?
+    action: update UserProfile
+    returns: UserProfile
+
+  route GET /users/:handle:
+    auth: public
+    action: fetch public UserProfile by handle (handle resolved via auth-service)
+    returns: { handle, display_name, avatar, bio }
+    error: if not found -> 404
+
+feature Preferences:
+  route GET /users/me/preferences:
+    action: fetch UserPreferences
+    returns: UserPreferences
+
+  route PUT /users/me/preferences:
+    input: theme?, email_notifications?, timezone?
+    action: update UserPreferences
+    returns: UserPreferences
+""",
+
+"api-gateway/platform.il": """\
+// api-gateway/platform.il — Gateway infrastructure with preserve rules
+
+domain platform:
+
+preserve:
+  - migrations/*
+  - .env
+  - .env.*
+  - config/secrets.yaml
+  - scripts/*
+
+@level: low
+config Database:
+  engine: postgres 15
+  pool_size: 15
+  statement_timeout: 20s
+
+config Redis:
+  host: localhost
+  port: 6379
+  db: 0
+  key_prefix: gateway:
+
+config AuthService:
+  base_url: http://auth-service:8001
+  timeout: 5s
+  retry: 2
+  reason: auth-service must be reachable — circuit break after 3 consecutive failures
+
+environment dev:
+  database: localhost:5432/gateway_dev
+  redis: localhost:6379
+  auth_service: http://localhost:8001
+  debug: true
+
+environment prod:
+  database: rds.prod/gateway + read_replica
+  redis: elasticache.prod
+  auth_service: http://auth-service.internal:8001
+""",
+
+}
+
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
 DESCRIPTIONS = {
-    "url-shortener":    "URL shortener with analytics         (fastapi + postgres + redis)",
-    "expense-tracker":  "Personal expense tracker with export (react + express + sqlite)",
-    "realtime-chat":    "Realtime chat with presence          (react + node + socket.io + redis)",
-    "file-hasher-cli":  "Fast file hashing CLI tool           (rust, shows @level:asm)",
-    "saas-starter":     "Multi-tenant SaaS with billing       (next.js + fastapi + stripe)",
+    "url-shortener":      "URL shortener with analytics         (fastapi + postgres + redis)",
+    "expense-tracker":    "Personal expense tracker with export (react + express + sqlite)",
+    "realtime-chat":      "Realtime chat with presence          (react + node + socket.io + redis)",
+    "file-hasher-cli":    "Fast file hashing CLI tool           (rust, shows @level:asm)",
+    "saas-starter":       "Multi-tenant SaaS with billing       (next.js + fastapi + stripe)",
+    "interface-showcase": "Interface + preserve showcase        (fastapi + postgres, shows publish/import)",
+    "microservices":      "Two microservices with interface import (go gRPC + python fastapi)",
 }
 
 def write_project(name: str, base_dir: str = "./examples"):
@@ -960,7 +1682,9 @@ def write_project(name: str, base_dir: str = "./examples"):
     out.mkdir(parents=True, exist_ok=True)
 
     for filename, content in project.items():
-        (out / filename).write_text(content, encoding="utf-8")
+        dest = out / filename
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
 
     print(f"✓  {name:20}  →  {out.resolve()}/")
     print(f"   {len(project)} files: {', '.join(project.keys())}")

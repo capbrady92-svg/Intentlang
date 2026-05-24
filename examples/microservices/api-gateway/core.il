@@ -14,7 +14,7 @@ project APIGateway:
     - content
 
   imports:
-    auth: ./auth-service
+    auth: ../auth-service
 
   rules:
     - all models get id (uuid pk), created_at, updated_at
