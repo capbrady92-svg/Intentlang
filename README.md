@@ -4,373 +4,164 @@
 
 ---
 
-## The Problem
+## Quick Start
 
-AI coding tools today accept natural language prompts. Natural language is the most ambiguous communication format humans have. Every underspecified prompt is a micro-decision silently outsourced to a model with no memory of what it decided last time, no stake in the outcome, and no structured understanding of your system.
+### 1. Install dependencies
 
-The result: code that looks right, runs in dev, and silently accumulates architectural decisions nobody made consciously.
+```bash
+pip install httpx rich prompt_toolkit
+```
 
-IntentLang fixes the input side of AI code generation.
+### 2. Set your API key
+
+Open `intentlang.py` and edit line 17:
+
+```python
+API_KEY = "sk-ant-your-key-here"
+```
+
+Supports Anthropic, OpenAI, xAI (Grok), OpenRouter, and local Ollama — see [docs/05-providers.md](docs/05-providers.md).
+
+### 3. Run
+
+```bash
+python intentlang.py
+```
+
+### 4. Try it immediately
+
+```
+il› load ./examples/url-shortener
+il› list
+il› transpile links.il
+```
+
+Watch it generate a complete FastAPI + Postgres + Redis URL shortener from a 60-line `.il` file.
 
 ---
 
-## What IntentLang Is
+## What Is IntentLang?
 
 IntentLang is an **intermediate intent language** — not a programming language, not prose specs, not pseudocode. It sits between human intent and generated code.
 
 ```
-You write .il  →  Parser builds IR  →  AI transpiles to any target
+You write .il  →  Parser builds IR  →  AI transpiles to any target stack
 ```
 
-The `.il` file is your **only source of truth**. Never edit generated code. If something needs to change, change the `.il` and regenerate.
+The `.il` file is your **only source of truth**. You never edit generated code. If something needs to change, you change the `.il` and regenerate. This discipline is the entire value proposition.
 
 ---
 
-## Core Concepts
+## The Problem It Solves
 
-### 1. Abstraction Levels
+AI coding tools accept natural language prompts. Natural language is the most ambiguous communication format humans have. Every underspecified prompt is a micro-decision silently outsourced to a model with no memory of what it decided last time.
 
-IntentLang spans the full stack from architecture to assembly. Use `@level:` to declare which layer you're operating at within any block:
+The result: code that looks right, runs in dev, and silently accumulates architectural decisions nobody made consciously — at the speed of AI generation.
 
-```
-@level: high   # default — features, APIs, data models, architecture
-@level: mid    # algorithms, business logic, specific data structures
-@level: low    # memory layout, performance constraints, system calls
-@level: asm    # register hints, instruction preferences, platform targets
-```
+IntentLang fixes the input side. It gives the AI:
 
-Levels can nest — a high-level feature can contain a low-level critical path:
+- A structured, parseable description of your system
+- A queryable IR graph of all dependencies and relationships
+- Global rules that propagate everywhere automatically
+- Precise abstraction level instructions from architecture down to assembly
 
-```
-feature ImageProcessor:
-  @level: high
-  input: raw_bytes
-  output: compressed_image
-
-  @level: low
-  critical_path encode_block:
-    @target: x86_64-linux
-    constraint: no heap allocation
-    constraint: SIMD preferred
-    max_cycles: 200
-```
-
-The transpiler sees the level context and matches its output accordingly — clean idiomatic code at `@level:high`, low-level C or inline asm at `@level:asm`.
-
-### 2. Multi-File Project Structure
-
-Organize your `.il` files by **domain** (concern), not technical layer:
-
-```
-intent/
-  core.il        # project root — stack, global rules, domain registry
-  identity.il    # users, auth, sessions
-  tasks.il       # task management domain
-  billing.il     # billing and subscriptions
-  platform.il    # infrastructure, deployment, low-level config
-```
-
-Every project needs a `core.il` that declares the stack and global rules:
-
-```
-project MyApp:
-  version: 0.1.0
-  stack: react + fastapi + postgres
-  pattern: REST
-  auth: jwt
-
-  domains:
-    - identity
-    - tasks
-    - platform
-
-  rules:
-    - all endpoints require auth unless marked public
-    - all models get id (uuid pk), created_at, updated_at
-    - all errors return { code, message, trace_id }
-    - audit log all mutations
-```
-
-Global rules propagate to **every file** in the project. The transpiler applies them everywhere without being told.
-
-### 3. Cross-File References
-
-Reference types from other domains with `@domain/Type`:
-
-```
-# tasks.il
-model Task:
-  owner: @identity/User!      # strict — fail if User doesn't exist in identity domain
-  assignee: @identity/User?   # optional — emit graceful fallback if missing
-  reviewer: @identity/User    # normal — resolve quietly
-```
-
-Reference semantics:
-- `@domain/Type` — standard reference, resolved at IR build time
-- `@domain/Type!` — strict: transpilation fails with a clear error if unresolved
-- `@domain/Type?` — optional: generates graceful fallback code if target is missing
-
-References are **semantic**, not syntactic. The transpiler decides what the reference means in the target stack — a foreign key in SQL, a populated object in GraphQL, a Mongoose ref in MongoDB. You express the relationship; the AI handles the mechanism.
-
-### 4. The IntentIR
-
-When all `.il` files are parsed, the system builds a **flat, queryable IR** (Intermediate Representation). This is the real source of truth the transpiler operates on.
-
-The IR contains:
-- Every node from every file, indexed by UID and type
-- A dependency graph of all cross-file references
-- Global rules propagated from `core.il`
-- Domain membership for every node
-- Abstraction level annotations
-
-The transpiler receives a compact IR summary (not the full source) plus only the adjacent nodes it needs. This is why IntentLang works reliably at scale — the AI always has surgical context, never a firehose.
-
-### 5. Transpilation is a Graph Traversal
-
-When you transpile a file, the system:
-
-1. Parses all `.il` files → builds complete IR
-2. Resolves all cross-file references → flags unresolved
-3. Propagates global rules from `core.il` down through the graph
-4. Identifies which nodes changed since last transpile (diff)
-5. Provides the AI with: the target node, its resolved dependencies, applicable global rules, and the diff
-
-Only changed nodes need regeneration. Change a field on `User` in `identity.il` — only User's model file, its migration, and the routes that directly reference it are regenerated. Everything else stays.
+The output is reliable because the input is precise.
 
 ---
 
-## Language Reference
-
-### Block Declarations
+## CLI Commands
 
 ```
-project MyApp:       # root — one per codebase, in core.il
-domain identity:     # domain boundary — one per file
-model User:          # data model
-feature Auth:        # feature grouping routes and logic
-route GET /users:    # HTTP endpoint (method + path)
-route WS /chat:      # WebSocket endpoint
-event user_joined:   # event (WebSocket, message queue, etc.)
-config Database:     # infrastructure config block
-platform infra:      # platform/deployment concerns
-critical_path foo:   # performance-critical code path
-inline raw_code:     # escape hatch for dropping in literal code
-```
-
-### Field Definitions
-
-```
-model User:
-  id (uuid, pk)
-  email (str, required, unique)
-  name (str, required)
-  role (str, default "member")
-  avatar (str, optional)
-  score (int, default 0)
-  active (bool, default true)
-  data (json, nullable)
-  tags (list, optional)
-```
-
-Available types: `str`, `int`, `float`, `bool`, `uuid`, `date`, `datetime`, `json`, `list`, `map`, `bytes`
-
-Available modifiers: `required`, `optional`, `pk`, `fk`, `unique`, `indexed`, `default`, `nullable`, `readonly`, `private`, `public`, `async`, `sync`
-
-### Relations
-
-```
-# Local (within same file)
-model Task:
-  project -> Project
-
-# Cross-domain
-model Task:
-  owner: @identity/User!
-  assignee: @identity/User?
-```
-
-### Route Blocks
-
-```
-feature Tasks:
-  route POST /tasks:
-    auth: required
-    input: title (str, required), priority?, due_date?
-    action: create Task, assign owner = current_user
-    returns: Task
-    error: if title empty -> 400 "Title required"
-    error: if not member -> 403 "Not a project member"
-
-  route PATCH /tasks/:id:
-    auth: required
-    input: title?, status?, priority?
-    action: update Task where id = :id, owner = current_user
-    returns: Task
-    error: if not found -> 404
-```
-
-### Rules Blocks
-
-```
-rules:
-  - all endpoints require auth unless marked public
-  - passwords must be hashed with bcrypt
-  - rate limit: 100 req/min/ip
-  - max file upload: 10mb
-```
-
-Rules in `core.il` apply globally. Rules inside a `feature:` block apply only to that feature.
-
-### Level Directives
-
-```
-@level: high        # applies to all children below until overridden
-@level: mid
-
-model Task:
-  title (str, required)
-
-  @level: low
-  search_vector (tsvector, indexed)    # this field gets low-level treatment
-
-@level: asm
-critical_path hot_loop:
-  @target: x86_64-linux
-  constraint: no heap allocation
-  constraint: prefer AVX2 intrinsics
-  max_cycles: 50
-```
-
-### Environment Blocks
-
-```
-environment dev:
-  database: localhost:5432/myapp_dev
-  cache: localhost:6379
-  email: console
-  debug: true
-
-environment staging:
-  database: rds.staging/myapp
-  email: ses
-
-environment prod:
-  database: rds.prod/myapp + read_replica
-  cache: elasticache.prod
-  cdn: cloudfront
+il› list                        show loaded files and IR summary
+il› view <file>                 preview a .il file with syntax highlighting
+il› query <q>                   query the IR graph
+il› transpile <file>            generate code from a .il file
+il› new <name>                  create a new .il file
+il› edit <file>                 open in $EDITOR, auto-reload on save
+il› save                        persist .il files to ./intent/
+il› load [dir]                  load .il files from a directory
+il› config                      show current configuration
+il› example                     reset to built-in example project
+il› help                        show all commands
+il› exit                        quit
 ```
 
 ---
 
-## The IR Query Engine
-
-The IDE includes a live query interface over the compiled IR. Use it to explore your project structure, debug cross-references, and understand impact before making changes.
-
-### Query Syntax
+## IR Query Commands
 
 ```
-list models                   # all model nodes across all files
-list features                 # all feature nodes
-list routes                   # all route nodes
-show global rules             # rules from core.il
-show stack                    # stack, project name, files
-show graph                    # all dependency edges
-show domains                  # domain → node count
+list models                     all models across all files
+list features                   all features
+list routes                     all routes
+list all                        every node in the IR
 
-deps of <name>                # what does <name> depend on?
-used by <name>                # what depends on <name>?
-impact of <name>              # direct + indirect dependents (before you change something)
-inspect <name>                # full IR node JSON for <name>
+show global rules               rules from core.il
+show stack                      stack, project name, files
+show graph                      all dependency edges
+show domains                    domain → node count
+
+deps of <name>                  what does this depend on?
+used by <name>                  what depends on this?
+impact of <name>                direct + indirect dependents
+inspect <name>                  full IR node as JSON
 ```
-
-### Example Workflow
-
-Before changing the `User` model:
-```
-> impact of User
-Direct dependents:
-  tasks:model:Task (xref)
-  tasks:feature:Tasks (xref)
-  identity:feature:Auth (relation)
-
-Indirect (2nd-order):
-  tasks:route:GET_/projects/:id/tasks
-  tasks:route:POST_/projects/:id/tasks
-```
-
-Now you know exactly what gets regenerated before touching anything.
 
 ---
 
-## Multi-File Dependency Resolution
+## Example Projects
 
-### How References Resolve
-
-Given:
-```
-# tasks.il
-model Task:
-  owner: @identity/User!
+```bash
+python examples.py              # list available projects
+python examples.py url-shortener
+python examples.py all          # write all 5 projects
 ```
 
-1. Parser sees `@identity/User!` → creates an `xref_property` node
-2. IR builder scans `ir.domains["identity"]` for a node with `name === "User"`
-3. If found: edge `tasks:model:Task → identity:model:User` added to graph, `resolved: true`
-4. If not found and strictness is `!`: transpilation blocked with clear error
-5. If not found and strictness is `?`: edge added as unresolved, transpiler emits fallback
-
-### Transpilation Order
-
-The transpiler topologically sorts changed nodes by their dependency edges. A model must be transpiled before the features that reference it. `core.il` global rules are always applied first.
+| Project | Stack | Complexity |
+|---|---|---|
+| url-shortener | fastapi + postgres + redis | Small — start here |
+| expense-tracker | react + express + sqlite | Medium |
+| realtime-chat | node + socket.io + redis | Medium, WebSocket events |
+| file-hasher-cli | rust | No web, shows @level:asm |
+| saas-starter | next.js + fastapi + stripe | Large, multi-domain |
 
 ---
 
-## IDE Panels
+## Documentation
 
-### Editor
-Write `.il` files with live syntax highlighting. Supports multiple files via file tabs. Tab key inserts 2-space indentation. `⌘↵` triggers transpilation.
-
-### IR Explorer
-Visual overview of the compiled IR: node type distribution, dependency edges, global rules, domain membership, abstraction level distribution, and parse errors.
-
-### Query
-Live query interface against the IR graph. Type any query and press Enter, or click suggested queries. Query history is preserved in session.
-
-### Output
-Generated code, split into file tabs. Select which `.il` file to transpile from the dropdown in the header. The AI receives the IR summary + target file + any referenced domain files as context.
+| File | Contents |
+|---|---|
+| [docs/01-language.md](docs/01-language.md) | Full language reference — every keyword, syntax, and directive |
+| [docs/02-projects.md](docs/02-projects.md) | Multi-file projects, domains, core.il, cross-file references |
+| [docs/03-ir.md](docs/03-ir.md) | The IR graph — how it works, how to query it, impact analysis |
+| [docs/04-transpiler.md](docs/04-transpiler.md) | How transpilation works, prompting strategy, output format |
+| [docs/05-providers.md](docs/05-providers.md) | Configuring Anthropic, OpenAI, Grok, Ollama and others |
 
 ---
 
 ## Design Principles
 
-**1. Never edit generated code.**
-The `.il` file is the source of truth. If you edit generated code, you have two sources of truth and you've lost the whole value. Change the `.il` and regenerate.
+**Never edit generated code.** The `.il` file is the source of truth. Editing generated code creates two sources of truth and destroys the value. Change the `.il` and regenerate.
 
-**2. Structure is not overhead — it's the product.**
-Every `rule:`, every `@level:`, every `constraint:` is load-bearing. The richer the `.il`, the better and more reliable the generated code.
+**Structure is not overhead — it's the product.** Every `rule:`, every `@level:`, every `constraint:` is load-bearing. The richer the `.il`, the more reliable the output.
 
-**3. The IR is the memory.**
-The compiled IR is what gives the AI access to your full project context without flooding it with source. Keep the IR current (it rebuilds on every edit in the IDE).
+**The IR is the memory.** The compiled IR gives the AI complete project context without flooding it with source code. It rebuilds on every change.
 
-**4. Levels are instructions, not labels.**
-`@level:asm` isn't a comment — it's an instruction to the transpiler to match the code to that level of abstraction. Use it intentionally.
+**Levels are instructions, not labels.** `@level:asm` tells the transpiler to emit low-level code. Use it intentionally.
 
-**5. Cross-file references are semantic contracts.**
-`@identity/User!` is a declaration that this thing *must exist* in the identity domain. It will fail loudly if it doesn't. That's intentional.
+**Cross-file references are contracts.** `@identity/User!` declares that User must exist in the identity domain. It fails loudly if it doesn't.
 
 ---
 
 ## Roadmap
 
-- [ ] CLI transpiler (`npx intentlang transpile`)
-- [ ] `.intentir/` persistent IR cache (incremental rebuilds)
-- [ ] IR diff viewer (what changed between versions)
-- [ ] Watch mode (auto-regenerate on `.il` save)
-- [ ] Multi-target transpilation (same `.il` → React + Vue simultaneously)
-- [ ] `inline:` block support (escape hatch for literal code injection)
-- [ ] Language server protocol (LSP) for editor integrations
-- [ ] `intentlang check` — validate all cross-refs without transpiling
-- [ ] Constitutional constraints (security rules that block unsafe patterns)
+- [ ] Watch mode — auto-regenerate on `.il` save
+- [ ] IR diff — what changed between versions
+- [ ] Incremental transpilation — only regenerate changed nodes
+- [ ] LSP — editor integration for VS Code
+- [ ] `inline:` blocks — escape hatch for literal code injection
+- [ ] `intentlang check` — validate all refs without transpiling
+- [ ] Multi-target — same `.il` → multiple output stacks simultaneously
 
 ---
 
